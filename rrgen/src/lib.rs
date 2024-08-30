@@ -3,6 +3,7 @@ use std::path::Path;
 use regex::Regex;
 use serde::Deserialize;
 use tera::{Context, Tera};
+use log::debug;
 
 mod tera_filters;
 pub trait FsDriver {
@@ -144,8 +145,8 @@ pub enum GenResult {
     Generated { message: Option<String> },
 }
 
-fn parse_template(input: &str) -> Result<(FrontMatter, String)> {
-    let (fm, body) = input.split_once("---\n").ok_or_else(|| {
+fn parse_template(input: &str,delimeter: &str) -> Result<(FrontMatter, String)> {
+    let (fm, body) = input.split_once(delimeter).ok_or_else(|| {
         Error::Message("cannot split document to frontmatter and body".to_string())
     })?;
     let frontmatter: FrontMatter = serde_yaml::from_str(fm)?;
@@ -171,13 +172,26 @@ impl RRgen {
     /// # Errors
     ///
     /// This function will return an error if operation fails
-    pub fn generate(&self, input: &str, vars: &serde_json::Value) -> Result<GenResult> {
+    pub fn generate(&self, input: &str, vars: &serde_json::Value) -> Result<()> {
+        let delimeter= vars.get("frontmatterSeparator").and_then(|v| v.as_str()).unwrap_or("===\n").to_string();
+        let document_separator = vars.get("documentSeparator").and_then(|v| v.as_str()).unwrap_or("---\n").to_string();
         let mut tera = Tera::default();
         tera_filters::register_all(&mut tera);
+        debug!("input: {input:?}");
         let rendered = tera.render_str(input, &Context::from_serialize(vars.clone())?)?;
-        let (frontmatter, body) = parse_template(&rendered)?;
+        debug!("rendered: {rendered:?}");
+        let documents = rendered.split(&document_separator).for_each(move |document| {
+            debug!("document: {document:?}");
+            self.gen_result(document,&delimeter).unwrap();
+        });
+        Ok(())
+    }
+
+    pub fn gen_result(&self, rendered: &str, delimeter: &str) -> Result<GenResult> {
+        let (frontmatter, body) = parse_template(&rendered,&delimeter)?;
         let path_to = Path::new(&frontmatter.to);
 
+        debug!("rendered: {:?}", rendered);
         if frontmatter.skip_exists && self.fs.exists(path_to) {
             self.printer.skip_exists(path_to);
             return Ok(GenResult::Skipped);
