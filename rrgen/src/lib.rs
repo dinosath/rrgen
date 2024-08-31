@@ -1,9 +1,10 @@
+use std::fs;
 use std::path::Path;
 
 use regex::Regex;
 use serde::Deserialize;
 use tera::{Context, Tera};
-use log::debug;
+use log::{debug, error};
 
 mod tera_filters;
 pub trait FsDriver {
@@ -70,7 +71,7 @@ impl Printer for ConsolePrinter {
 
 #[derive(Deserialize, Debug, Default)]
 struct FrontMatter {
-    to: String,
+    to:Option<String>,
 
     #[serde(default)]
     skip_exists: bool,
@@ -119,6 +120,9 @@ struct Injection {
 
     #[serde(default)]
     append: bool,
+
+    #[serde(default)]
+    create_if_missing: bool,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -145,8 +149,10 @@ pub enum GenResult {
     Generated { message: Option<String> },
 }
 
-fn parse_template(input: &str,delimeter: &str) -> Result<(FrontMatter, String)> {
-    let (fm, body) = input.split_once(delimeter).ok_or_else(|| {
+fn parse_template(input: &str, delimeter: &str) -> Result<(FrontMatter, String)> {
+    let (fm, body) = input.trim().split_once(delimeter).ok_or_else(|| {
+        debug!("input:{input}");
+        debug!("delimeter:{delimeter}");
         Error::Message("cannot split document to frontmatter and body".to_string())
     })?;
     let frontmatter: FrontMatter = serde_yaml::from_str(fm)?;
@@ -173,53 +179,65 @@ impl RRgen {
     ///
     /// This function will return an error if operation fails
     pub fn generate(&self, input: &str, vars: &serde_json::Value) -> Result<()> {
-        let delimeter= vars.get("frontmatterSeparator").and_then(|v| v.as_str()).unwrap_or("===\n").to_string();
+        let delimeter = vars.get("frontmatterSeparator").and_then(|v| v.as_str()).unwrap_or("===\n").to_string();
         let document_separator = vars.get("documentSeparator").and_then(|v| v.as_str()).unwrap_or("---\n").to_string();
         let mut tera = Tera::default();
         tera_filters::register_all(&mut tera);
-        debug!("input: {input:?}");
+        // debug!("input: {input:?}");
         let rendered = tera.render_str(input, &Context::from_serialize(vars.clone())?)?;
-        debug!("rendered: {rendered:?}");
-        let documents = rendered.split(&document_separator).for_each(move |document| {
-            debug!("document: {document:?}");
-            self.gen_result(document,&delimeter).unwrap();
+        // debug!("rendered: {rendered:?}");
+        let documents = rendered.split(&document_separator).filter(move |x| x.trim().len() > 1).for_each(move |document| {
+            // debug!("document: {document:?}");
+            self.gen_result(document, &delimeter).unwrap();
         });
         Ok(())
     }
 
     pub fn gen_result(&self, rendered: &str, delimeter: &str) -> Result<GenResult> {
-        let (frontmatter, body) = parse_template(&rendered,&delimeter)?;
-        let path_to = Path::new(&frontmatter.to);
+        // debug!("rendered: {:?}", rendered);
+        let (frontmatter, body) = parse_template(&rendered, &delimeter)?;
+        // debug!("frontmatter: {:?}", frontmatter);
+        // debug!("body: {:?}", body);
 
-        debug!("rendered: {:?}", rendered);
-        if frontmatter.skip_exists && self.fs.exists(path_to) {
-            self.printer.skip_exists(path_to);
-            return Ok(GenResult::Skipped);
-        }
-        if let Some(skip_glob) = frontmatter.skip_glob {
-            if glob::glob(&skip_glob)?.count() > 0 {
+
+        if let Some(to) = frontmatter.to {
+            let path_to = Path::new(&to);
+            if frontmatter.skip_exists && self.fs.exists(path_to) {
                 self.printer.skip_exists(path_to);
                 return Ok(GenResult::Skipped);
             }
-        }
+            //TODO: Skip only if the content is different
+            if let Some(skip_glob) = frontmatter.skip_glob {
+                if glob::glob(&skip_glob)?.count() > 0 {
+                    self.printer.skip_exists(path_to);
+                    return Ok(GenResult::Skipped);
+                }
+            }
 
-        if self.fs.exists(path_to) {
-            self.printer.overwrite_file(path_to);
-        } else {
-            self.printer.add_file(path_to);
+            if self.fs.exists(path_to) {
+                self.printer.overwrite_file(path_to);
+            } else {
+                self.printer.add_file(path_to);
+            }
+            // write main file
+            self.fs.write_file(path_to, &body)?;
         }
-        // write main file
-        self.fs.write_file(path_to, &body)?;
 
         // handle injects
+        // since injection is a dependency for another file wait for it to be created
+        //TODO check if  injections already exist and do it if not
         if let Some(injections) = frontmatter.injections {
             for injection in &injections {
                 let injection_to = Path::new(&injection.into);
                 if !self.fs.exists(injection_to) {
-                    return Err(Error::Message(format!(
-                        "cannot inject into {}: file does not exist",
-                        injection.into,
-                    )));
+                    if (injection.create_if_missing) {
+                        fs::File::create(injection.into.clone())?;
+                    } else {
+                        return Err(Error::Message(format!(
+                            "cannot inject into {}: file does not exist",
+                            injection.into,
+                        )));
+                    }
                 }
 
                 let file_content = self.fs.read_file(injection_to)?;
