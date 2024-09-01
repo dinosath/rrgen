@@ -1,6 +1,9 @@
+use std::env;
 use std::fs;
-use std::path::Path;
-
+use std::path::{Path, PathBuf};
+use anyhow::{anyhow, Result};
+use derive_builder::Builder;
+use glob::glob;
 use regex::Regex;
 use serde::Deserialize;
 use tera::{Context, Tera};
@@ -142,8 +145,8 @@ pub enum Error {
     #[error(transparent)]
     Any(Box<dyn std::error::Error + Send + Sync>),
 }
-type Result<T> = std::result::Result<T, Error>;
 
+#[derive(Debug)]
 pub enum GenResult {
     Skipped,
     Generated { message: Option<String> },
@@ -152,7 +155,9 @@ pub enum GenResult {
 fn parse_template(input: &str, delimeter: &str) -> Result<(FrontMatter, String)> {
     let (fm, body) = input.trim().split_once(delimeter).ok_or_else(|| {
         debug!("input:{input}");
+        println!("input:{input}");
         debug!("delimeter:{delimeter}");
+        println!("delimeter:{delimeter}");
         Error::Message("cannot split document to frontmatter and body".to_string())
     })?;
     let frontmatter: FrontMatter = serde_yaml::from_str(fm)?;
@@ -161,41 +166,114 @@ fn parse_template(input: &str, delimeter: &str) -> Result<(FrontMatter, String)>
 pub struct RRgen {
     fs: Box<dyn FsDriver>,
     printer: Box<dyn Printer>,
+    frontmatter_separator: String,
+    document_separator: String,
+    output_directory: String,
+    tera_glob_directory: Option<String>,
+    tera: Tera,
 }
 
 impl Default for RRgen {
     fn default() -> Self {
+        let rrgen_tera_glob_directory = env::var("RRGEN_TERA_GLOB_DIRECTORY").ok();
+        let mut tera = match &rrgen_tera_glob_directory {
+            Some(templates_dir) => Tera::new(templates_dir),
+            None => Ok(Tera::default()),
+        }.unwrap();
+        tera_filters::register_all(&mut tera);
         Self {
             fs: Box::new(RealFsDriver {}),
             printer: Box::new(ConsolePrinter {}),
+            frontmatter_separator: env::var("RRGEN_FRONTMATTER_SEPARATOR").unwrap_or("---\n".into()),
+            document_separator: env::var("RRGEN_DOCUMENT_SEPARATOR").unwrap_or("===\n".into()),
+            output_directory: env::var("RRGEN_OUTPUT_DIRECTORY").unwrap_or(".".into()),
+            tera_glob_directory: rrgen_tera_glob_directory,
+            tera: tera,
         }
     }
 }
 
 impl RRgen {
+    /// Traverse all files in `glob` and generate from template contained in each file
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if operation fails
+    pub async fn generate_glob(&mut self, dir: &str, vars: &serde_json::Value) -> Result<()> {
+        let ctx= match Context::from_serialize(vars){
+            Ok(ctx) => ctx,
+            Err(e) => return Err(anyhow!("cannot get context from vars:{}, error:{}",vars, e)),
+        };
+        let files = match glob(dir){
+            Ok(glob) => glob,
+            Err(e) => return Err(anyhow!("invalid glob pattern: {}", e)),
+        };
+        let files: Vec<PathBuf> = files
+            .filter_map(|entry| {
+                match entry {
+                    Ok(path) => Some(path),
+                    Err(e) => {
+                        error!("Failed to read glob entry: {:?}", e); // Log the error
+                        None // Discard the error by returning `None`
+                    }
+                }
+            })
+            .collect();
+
+        debug!("files: {:?}", files);
+        let contents = files.iter().map(|x| {
+                fs::read_to_string(x).unwrap_or_else(|e| {
+                    debug!("error reading file {x:?} due to:{e}");
+                    String::new()
+                })
+            })
+            .filter(|x| !x.is_empty())
+            .collect::<Vec<String>>();
+        debug!("contents: {:?}", contents);
+        let rendered_list = contents.iter()
+            .map(|content| {
+                self.tera.render_str(content, &ctx)
+                    .unwrap_or_else(|e| {
+                        debug!("error rendering file {:?} due to:{e}",content);
+                        String::new()
+                    })
+            })
+            .filter(|x| !x.is_empty())
+            .collect::<Vec<String>>();
+        debug!("rendered_list: {:?}", rendered_list);
+
+        let gen_results: Vec<GenResult> = rendered_list
+            .iter()
+            .flat_map(|s| s.split(&self.document_separator))
+            .map(|s| s.to_string())
+            .filter(|x| x.trim().len() > 1)
+            .map(|doc| self.gen_result(&doc).unwrap_or_else(|e| {
+                debug!("error generating document {doc:?} due to:{e}");
+                GenResult::Skipped
+            }))
+            .collect::<Vec<GenResult>>();
+        debug!("gen_results: {:?}", gen_results);
+        Ok(())
+    }
     /// Generate from a template contained in `input`
     ///
     /// # Errors
     ///
     /// This function will return an error if operation fails
-    pub fn generate(&self, input: &str, vars: &serde_json::Value) -> Result<()> {
-        let delimeter = vars.get("frontmatterSeparator").and_then(|v| v.as_str()).unwrap_or("===\n").to_string();
-        let document_separator = vars.get("documentSeparator").and_then(|v| v.as_str()).unwrap_or("---\n").to_string();
-        let mut tera = Tera::default();
-        tera_filters::register_all(&mut tera);
+    pub fn generate(&mut self, input: &str, vars: &serde_json::Value) -> Result<()> {
         // debug!("input: {input:?}");
-        let rendered = tera.render_str(input, &Context::from_serialize(vars.clone())?)?;
+        let rendered = self.tera.render_str(input, &Context::from_serialize(vars.clone())?)?;
         // debug!("rendered: {rendered:?}");
-        let documents = rendered.split(&document_separator).filter(move |x| x.trim().len() > 1).for_each(move |document| {
+        let documents = rendered.split(&self.document_separator).filter(move |x| x.trim().len() > 1).for_each(|document| {
             // debug!("document: {document:?}");
-            self.gen_result(document, &delimeter).unwrap();
+            self.gen_result(document).unwrap();
         });
         Ok(())
     }
 
-    pub fn gen_result(&self, rendered: &str, delimeter: &str) -> Result<GenResult> {
+    pub fn gen_result(&self, rendered: &str) -> Result<GenResult> {
         // debug!("rendered: {:?}", rendered);
-        let (frontmatter, body) = parse_template(&rendered, &delimeter)?;
+        let (frontmatter, body) = parse_template(&rendered, &self.frontmatter_separator)?;
         // debug!("frontmatter: {:?}", frontmatter);
         // debug!("body: {:?}", body);
 
@@ -230,13 +308,13 @@ impl RRgen {
             for injection in &injections {
                 let injection_to = Path::new(&injection.into);
                 if !self.fs.exists(injection_to) {
-                    if (injection.create_if_missing) {
+                    if injection.create_if_missing {
                         fs::File::create(injection.into.clone())?;
                     } else {
-                        return Err(Error::Message(format!(
+                        return Err(anyhow!(
                             "cannot inject into {}: file does not exist",
                             injection.into,
-                        )));
+                        ));
                     }
                 }
 

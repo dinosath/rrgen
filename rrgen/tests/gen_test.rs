@@ -21,7 +21,7 @@ fn test_generate() {
         },
     )
     .unwrap();
-    let rgen = RRgen::default();
+    let mut rgen = RRgen::default();
 
     rgen.generate(
         &fs::read_to_string("tests/fixtures/test1/template.t").unwrap(),
@@ -47,7 +47,7 @@ fn test_realistic() {
         },
     )
     .unwrap();
-    let rgen = RRgen::default();
+    let mut rgen = RRgen::default();
 
     rgen.generate(
         &fs::read_to_string("tests/fixtures/realistic/controller.t").unwrap(),
