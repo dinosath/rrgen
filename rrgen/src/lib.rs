@@ -1,8 +1,8 @@
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Result};
-use derive_builder::Builder;
 use glob::glob;
 use regex::Regex;
 use serde::Deserialize;
@@ -154,10 +154,6 @@ pub enum GenResult {
 
 fn parse_template(input: &str, delimeter: &str) -> Result<(FrontMatter, String)> {
     let (fm, body) = input.trim().split_once(delimeter).ok_or_else(|| {
-        debug!("input:{input}");
-        println!("input:{input}");
-        debug!("delimeter:{delimeter}");
-        println!("delimeter:{delimeter}");
         Error::Message("cannot split document to frontmatter and body".to_string())
     })?;
     let frontmatter: FrontMatter = serde_yaml::from_str(fm)?;
@@ -166,11 +162,15 @@ fn parse_template(input: &str, delimeter: &str) -> Result<(FrontMatter, String)>
 pub struct RRgen {
     fs: Box<dyn FsDriver>,
     printer: Box<dyn Printer>,
-    frontmatter_separator: String,
-    document_separator: String,
-    output_directory: String,
+    pub frontmatter_separator: String,
+    pub document_separator: String,
+    pub output_directory: String,
     tera_glob_directory: Option<String>,
     tera: Tera,
+    template_file_extensions: Vec<String>,
+    render_only_file_with_extension: bool,
+    copy_non_template: bool,
+    overwrite: bool,
 }
 
 impl Default for RRgen {
@@ -189,6 +189,10 @@ impl Default for RRgen {
             output_directory: env::var("RRGEN_OUTPUT_DIRECTORY").unwrap_or(".".into()),
             tera_glob_directory: rrgen_tera_glob_directory,
             tera: tera,
+            template_file_extensions: vec!("rrgen".to_string()),
+            render_only_file_with_extension: true,
+            copy_non_template: true,
+            overwrite: true,
         }
     }
 }
@@ -204,11 +208,80 @@ impl RRgen {
             Ok(ctx) => ctx,
             Err(e) => return Err(anyhow!("cannot get context from vars:{}, error:{}",vars, e)),
         };
+        let template_file_extensions = self.template_file_extensions.clone(); // clone before mutable borrow
+        let document_separator = self.document_separator.clone();
+        let tera = self.tera.clone();
+
+        let files = self.file_tostring_from_dir(dir).await?.clone();
+        let template_file_extensions = &self.template_file_extensions.clone();
+
+        let filtered_files= files.iter()
+            .filter(|(name, _content)| {
+                let file_extension = &name.clone()
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                !template_file_extensions.contains(file_extension)
+            })
+            .for_each(|(name, content)| {
+                let binding = name.clone();
+                let b2 = dir.clone();
+                let relative_path = binding.strip_prefix(b2.strip_suffix("**/*").unwrap())
+                    .unwrap_or_else(|_| name);
+
+                let content = content.clone();
+                let mut output_file_path = PathBuf::from(format!("{}/{}", self.output_directory, relative_path.display()));
+                match self.fs.write_file(&mut output_file_path,&content){
+                    Ok(_) => {}
+                    Err(_) => error!("cannot write file to output directory:{}, error:{}",relative_path.display(), content),
+                }
+            });
+
+
+        let rendered_list = files.iter()
+            .filter(|(name, _content)| {
+                let file_extension = &name.clone()
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                template_file_extensions.contains(file_extension)
+            })
+            .map(|(name, content)| {
+                (name,self.tera.render_str(content, &ctx)
+                    .unwrap_or_else(|e| {
+                        debug!("error rendering file {:?} due to:{e}",content);
+                        String::new()
+                    }))
+            })
+            .filter(|(_name, render)| !render.is_empty())
+            .collect::<HashMap<_,_>>();
+
+        let gen_results: Vec<GenResult> = rendered_list
+            .iter()
+            .flat_map(|(_name, render)| render.split(&document_separator))
+            .map(|s| s.to_string())
+            .filter(|x| x.trim().len() > 1)
+            // .map(move |rendered| {
+            //     let (frontmatter, body) = parse_template(&rendered, &self.frontmatter_separator)?;
+            //     (frontmatter, body)
+            // })
+            .map(|doc| self.gen_result(&doc).unwrap_or_else(|e| {
+                debug!("error generating document {doc:?} due to:{e}");
+                GenResult::Skipped
+            }))
+            .collect::<Vec<GenResult>>();
+        Ok(())
+    }
+
+    pub async fn file_tostring_from_dir(&mut self, dir: &str) -> std::result::Result<HashMap<PathBuf,String>, anyhow::Error> {
         let files = match glob(dir){
             Ok(glob) => glob,
             Err(e) => return Err(anyhow!("invalid glob pattern: {}", e)),
         };
-        let files: Vec<PathBuf> = files
+        debug!("loaded glob.");
+        let file_paths: Vec<PathBuf> = files
             .filter_map(|entry| {
                 match entry {
                     Ok(path) => Some(path),
@@ -220,41 +293,20 @@ impl RRgen {
             })
             .collect();
 
-        debug!("files: {:?}", files);
-        let contents = files.iter().map(|x| {
-                fs::read_to_string(x).unwrap_or_else(|e| {
-                    debug!("error reading file {x:?} due to:{e}");
-                    String::new()
-                })
-            })
-            .filter(|x| !x.is_empty())
-            .collect::<Vec<String>>();
-        debug!("contents: {:?}", contents);
-        let rendered_list = contents.iter()
-            .map(|content| {
-                self.tera.render_str(content, &ctx)
-                    .unwrap_or_else(|e| {
-                        debug!("error rendering file {:?} due to:{e}",content);
-                        String::new()
-                    })
-            })
-            .filter(|x| !x.is_empty())
-            .collect::<Vec<String>>();
-        debug!("rendered_list: {:?}", rendered_list);
-
-        let gen_results: Vec<GenResult> = rendered_list
-            .iter()
-            .flat_map(|s| s.split(&self.document_separator))
-            .map(|s| s.to_string())
-            .filter(|x| x.trim().len() > 1)
-            .map(|doc| self.gen_result(&doc).unwrap_or_else(|e| {
-                debug!("error generating document {doc:?} due to:{e}");
-                GenResult::Skipped
-            }))
-            .collect::<Vec<GenResult>>();
-        debug!("gen_results: {:?}", gen_results);
-        Ok(())
+        let files = file_paths.iter()
+            .filter( |f|f.exists() && f.is_file())
+            .map(|x| {
+            let content = fs::read_to_string(x.clone()).unwrap_or_else(|e| {
+                debug!("error reading file {x:?} due to:{e}");
+                String::new()
+            });
+            (x.clone(), content.clone())
+        })
+            .filter(|(_, content)| !content.is_empty())
+            .collect::<HashMap<_, _>>();
+        Ok(files)
     }
+
     /// Generate from a template contained in `input`
     ///
     /// # Errors
@@ -264,7 +316,7 @@ impl RRgen {
         // debug!("input: {input:?}");
         let rendered = self.tera.render_str(input, &Context::from_serialize(vars.clone())?)?;
         // debug!("rendered: {rendered:?}");
-        let documents = rendered.split(&self.document_separator).filter(move |x| x.trim().len() > 1).for_each(|document| {
+        rendered.split(&self.document_separator).filter(move |x| x.trim().len() > 1).for_each(|document| {
             // debug!("document: {document:?}");
             self.gen_result(document).unwrap();
         });
