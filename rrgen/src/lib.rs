@@ -7,7 +7,7 @@ use glob::glob;
 use regex::Regex;
 use serde::Deserialize;
 use tera::{Context, Tera};
-use log::{debug, error};
+use log::{info, debug, error};
 
 mod tera_filters;
 pub trait FsDriver {
@@ -56,19 +56,19 @@ pub trait Printer {
 pub struct ConsolePrinter {}
 impl Printer for ConsolePrinter {
     fn overwrite_file(&self, file_to: &Path) {
-        println!("overwritten: {file_to:?}");
+        info!("overwritten: {file_to:?}");
     }
 
     fn add_file(&self, file_to: &Path) {
-        println!("added: {file_to:?}");
+        info!("added: {file_to:?}");
     }
 
     fn injected(&self, file_to: &Path) {
-        println!("injected: {file_to:?}");
+        info!("injected: {file_to:?}");
     }
 
     fn skip_exists(&self, file_to: &Path) {
-        println!("skipped (exists): {file_to:?}");
+        info!("skipped (exists): {file_to:?}");
     }
 }
 
@@ -251,7 +251,7 @@ impl RRgen {
             .map(|(name, content)| {
                 (name,self.tera.render_str(content, &ctx)
                     .unwrap_or_else(|e| {
-                        debug!("error rendering file {:?} due to:{e}",content);
+                        debug!("error rendering file {:?} due to:{:?},{:?}",name,e,e.kind);
                         String::new()
                     }))
             })
@@ -418,7 +418,7 @@ impl RRgen {
                         .collect::<Vec<_>>();
                     lines.join("\n")
                 } else {
-                    println!("warning: no injection made");
+                    info!("warning: no injection made");
                     file_content.clone()
                 };
 
