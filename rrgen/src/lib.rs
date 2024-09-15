@@ -8,6 +8,7 @@ use regex::Regex;
 use serde::Deserialize;
 use tera::{Context, Tera};
 use log::{info, debug, error};
+use std::collections::BTreeMap;
 
 mod tera_filters;
 pub trait FsDriver {
@@ -198,12 +199,23 @@ impl Default for RRgen {
 }
 
 impl RRgen {
+    pub fn add_templates_to_tera(&mut self, glob: &str){
+        self.tera = match Tera::new(glob) {
+            Ok(mut tera) => {
+                tera_filters::register_all(&mut tera);
+                tera
+            },
+            Err(e) => panic!("Error initializing Tera: {}", e),
+        };
+    }
+
     /// Traverse all files in `glob` and generate from template contained in each file
     ///
     /// # Errors
     ///
     /// This function will return an error if operation fails
     pub async fn generate_glob(&mut self, dir: &str, vars: &serde_json::Value) -> Result<()> {
+        self.add_templates_to_tera(format!("{}.tpl",dir).to_string().as_str());
         let ctx= match Context::from_serialize(vars){
             Ok(ctx) => ctx,
             Err(e) => return Err(anyhow!("cannot get context from vars:{}, error:{}",vars, e)),
@@ -238,7 +250,6 @@ impl RRgen {
                 }
             });
 
-
         let rendered_list = files.iter()
             .filter(|(name, _content)| {
                 let file_extension = &name.clone()
@@ -249,6 +260,7 @@ impl RRgen {
                 template_file_extensions.contains(file_extension)
             })
             .map(|(name, content)| {
+                debug!("rendering file:{}",name.display());
                 (name,self.tera.render_str(content, &ctx)
                     .unwrap_or_else(|e| {
                         debug!("error rendering file {:?} due to:{:?},{:?}",name,e,e.kind);
@@ -275,7 +287,7 @@ impl RRgen {
         Ok(())
     }
 
-    pub async fn file_tostring_from_dir(&mut self, dir: &str) -> std::result::Result<HashMap<PathBuf,String>, anyhow::Error> {
+    pub async fn file_tostring_from_dir(&mut self, dir: &str) -> std::result::Result<BTreeMap<PathBuf,String>, anyhow::Error> {
         let files = match glob(dir){
             Ok(glob) => glob,
             Err(e) => return Err(anyhow!("invalid glob pattern: {}", e)),
@@ -303,7 +315,7 @@ impl RRgen {
             (x.clone(), content.clone())
         })
             .filter(|(_, content)| !content.is_empty())
-            .collect::<HashMap<_, _>>();
+            .collect::<BTreeMap<_, _>>();
         Ok(files)
     }
 
@@ -321,6 +333,7 @@ impl RRgen {
             self.gen_result(document).unwrap();
         });
         Ok(())
+
     }
 
     pub fn gen_result(&self, rendered: &str) -> Result<GenResult> {
