@@ -167,6 +167,7 @@ pub struct RRgen {
     pub document_separator: String,
     pub output_directory: String,
     tera_glob_directory: Option<String>,
+    tera_glob_pattern: String,
     tera: Tera,
     template_file_extensions: Vec<String>,
     render_only_file_with_extension: bool,
@@ -188,6 +189,7 @@ impl Default for RRgen {
             frontmatter_separator: env::var("RRGEN_FRONTMATTER_SEPARATOR").unwrap_or("---\n".into()),
             document_separator: env::var("RRGEN_DOCUMENT_SEPARATOR").unwrap_or("===\n".into()),
             output_directory: env::var("RRGEN_OUTPUT_DIRECTORY").unwrap_or(".".into()),
+            tera_glob_pattern: env::var("RRGEN_TERA_GLOB_DIRECTORY").unwrap_or("**/_*.tpl".into()),
             tera_glob_directory: rrgen_tera_glob_directory,
             tera: tera,
             template_file_extensions: vec!("rrgen".to_string()),
@@ -209,12 +211,26 @@ impl RRgen {
         };
     }
 
+
+    pub fn add_dir_to_tera(&mut self, dir: PathBuf){
+        let tera_glob = dir.join(&self.tera_glob_pattern).to_str().unwrap().to_string();
+        self.tera = match Tera::new(tera_glob.as_str()) {
+            Ok(mut tera) => {
+                tera_filters::register_all(&mut tera);
+                tera
+            },
+            Err(e) => panic!("Error initializing Tera: {}", e),
+        };
+    }
+
     /// Traverse all files in `glob` and generate from template contained in each file
     ///
     /// # Errors
     ///
     /// This function will return an error if operation fails
     pub async fn generate_glob(&mut self, dir: &str, vars: &serde_json::Value) -> Result<()> {
+        let templates_glob = format!("{}.tpl",dir);
+        debug!("templates_glob: {templates_glob}");
         self.add_templates_to_tera(format!("{}.tpl",dir).to_string().as_str());
         let ctx= match Context::from_serialize(vars){
             Ok(ctx) => ctx,
