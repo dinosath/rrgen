@@ -212,15 +212,28 @@ impl RRgen {
     }
 
 
-    pub fn add_dir_to_tera(&mut self, dir: PathBuf){
+    pub fn add_dir_to_tera(&mut self, dir: PathBuf) {
+        if !dir.is_dir() {
+            panic!("Error: {:?} is not a directory", dir);
+        }
+
         let tera_glob = dir.join(&self.tera_glob_pattern).to_str().unwrap().to_string();
-        self.tera = match Tera::new(tera_glob.as_str()) {
-            Ok(mut tera) => {
-                tera_filters::register_all(&mut tera);
-                tera
-            },
-            Err(e) => panic!("Error initializing Tera: {}", e),
-        };
+
+        let template_files = glob(&tera_glob)
+            .expect("Failed to read glob pattern")
+            .filter_map(|entry| match entry {
+                Ok(path) => {
+                    if path.is_file() {
+                        let filename = path.file_name().unwrap().to_str().unwrap().to_string();
+                        Some((path,Some(filename)))
+                    } else {
+                        None
+                    }
+                }
+                Err(_) => None,
+            });
+
+        self.tera.add_template_files(template_files).unwrap();
     }
 
     /// Traverse all files in `glob` and generate from template contained in each file
