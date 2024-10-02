@@ -57,19 +57,19 @@ pub trait Printer {
 pub struct ConsolePrinter {}
 impl Printer for ConsolePrinter {
     fn overwrite_file(&self, file_to: &Path) {
-        info!("overwritten: {file_to:?}");
+        debug!("overwritten: {file_to:?}");
     }
 
     fn add_file(&self, file_to: &Path) {
-        info!("added: {file_to:?}");
+        debug!("added: {file_to:?}");
     }
 
     fn injected(&self, file_to: &Path) {
-        info!("injected: {file_to:?}");
+        debug!("injected: {file_to:?}");
     }
 
     fn skip_exists(&self, file_to: &Path) {
-        info!("skipped (exists): {file_to:?}");
+        debug!("skipped (exists): {file_to:?}");
     }
 }
 
