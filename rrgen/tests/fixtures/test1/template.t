@@ -26,6 +26,10 @@ injections:
 - into: tests/fixtures/test1/generated/remove_lines.txt
   content: ""
   remove_lines: "Delete this line"
+- into: tests/fixtures/test1/generated/after_inline.txt
+  content: "World"
+  after: "Hello"
+  inline: true
 ---
 
 hello, this is the file body.
