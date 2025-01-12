@@ -30,6 +30,9 @@ injections:
   content: "World"
   after: "Hello"
   inline: true
+- into: tests/fixtures/test1/generated/replace.txt
+  content: "World"
+  replace: "Hello"
 ---
 
 hello, this is the file body.
