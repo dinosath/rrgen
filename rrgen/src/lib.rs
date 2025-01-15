@@ -5,7 +5,7 @@ compile_error!("You cannot enable both 'tera' and 'minijinja' at the same time."
 compile_error!("You must enable exactly one feature: 'tera' or 'minijinja'.");
 
 use std::path::{Path, PathBuf};
-
+use crate::MatchPositions::{All, First, Last};
 use regex::Regex;
 use serde::Deserialize;
 #[cfg(feature = "tera")]
@@ -118,11 +118,19 @@ struct Injection {
 
     #[serde(with = "serde_regex")]
     #[serde(default)]
+    before_all: Option<Regex>,
+
+    #[serde(with = "serde_regex")]
+    #[serde(default)]
     before_last: Option<Regex>,
 
     #[serde(with = "serde_regex")]
     #[serde(default)]
     after: Option<Regex>,
+
+    #[serde(with = "serde_regex")]
+    #[serde(default)]
+    after_all: Option<Regex>,
 
     #[serde(with = "serde_regex")]
     #[serde(default)]
@@ -135,6 +143,10 @@ struct Injection {
     #[serde(with = "serde_regex")]
     #[serde(default)]
     replace: Option<Regex>,
+
+    #[serde(with = "serde_regex")]
+    #[serde(default)]
+    replace_all: Option<Regex>,
 
     #[serde(default)]
     prepend: bool,
@@ -439,69 +451,17 @@ impl RRgen {
                 } else if injection.append {
                     format!("{file_content}\n{content}")
                 } else if let Some(before) = &injection.before {
-                    if injection.inline {
-                        let new_content = before.replace_all(&file_content, |caps: &regex::Captures| {
-                            format!("{}{}", content, &caps[0])
-                        });
-                        new_content.to_string()
-                    } else {
-                        let mut lines = file_content.lines().collect::<Vec<_>>();
-                        let pos = lines.iter().position(|ln| before.is_match(ln));
-                        if let Some(pos) = pos {
-                            lines.insert(pos, content);
-                        }
-                        lines.join("\n")
-                    }
+                    insert_content_at_positions(&file_content, content, injection.inline, before, First, InsertionPoint::Before)
                 } else if let Some(before_last) = &injection.before_last {
-                    if injection.inline {
-                        let new_content = if let Some(last) = before_last.find_iter(&file_content).last() {
-                            let mut result = file_content.clone();
-                            result.replace_range(last.start()..last.start(), content);
-                            result
-                        } else {
-                            file_content.clone()
-                        };
-                        new_content
-                    } else {
-                        let mut lines = file_content.lines().collect::<Vec<_>>();
-                        let pos = lines.iter().rposition(|ln| before_last.is_match(ln));
-                        if let Some(pos) = pos {
-                            lines.insert(pos, content);
-                        }
-                        lines.join("\n")
-                    }
+                    insert_content_at_positions(&file_content, content, injection.inline, before_last, Last, InsertionPoint::Before)
+                } else if let Some(before_last) = &injection.before_all {
+                    insert_content_at_positions(&file_content, content, injection.inline, before_last, All, InsertionPoint::Before)
                 } else if let Some(after) = &injection.after {
-                    if injection.inline {
-                        let new_content = after.replace_all(&file_content, |caps: &regex::Captures| {
-                            format!("{}{}", &caps[0], content)
-                        });
-                        new_content.to_string()
-                    } else {
-                        let mut lines = file_content.lines().collect::<Vec<_>>();
-                        let pos = lines.iter().position(|ln| after.is_match(ln));
-                        if let Some(pos) = pos {
-                            lines.insert(pos + 1, content);
-                        }
-                        lines.join("\n")
-                    }
+                    insert_content_at_positions(&file_content, content, injection.inline, after, First, InsertionPoint::After)
                 } else if let Some(after_last) = &injection.after_last {
-                    if injection.inline {
-                        let new_content = if let Some(last) = after_last.find_iter(&file_content).last() {
-                            let mut result = file_content.clone();
-                            result.replace_range(last.end()..last.end(), content);
-                            result
-                        } else {
-                            file_content.clone()
-                        };
-                        new_content
-                    } else {
-                        let mut lines = file_content.lines().collect::<Vec<_>>();
-                        let pos = lines.iter().rposition(|ln| after_last.is_match(ln));
-                        if let Some(pos) = pos {
-                            lines.insert(pos + 1, content);
-                        }
-                        lines.join("\n")
-                    }
+                    insert_content_at_positions(&file_content, content, injection.inline, after_last, Last, InsertionPoint::After)
+                } else if let Some(after_all) = &injection.after_all {
+                    insert_content_at_positions(&file_content, content, injection.inline, after_all, All, InsertionPoint::After)
                 } else if let Some(remove_lines) = &injection.remove_lines {
                     let lines = file_content
                         .lines()
@@ -509,20 +469,107 @@ impl RRgen {
                         .collect::<Vec<_>>();
                     lines.join("\n")
                 } else if let Some(replace) = &injection.replace {
-                    replace.replace_all(&file_content, content.as_str()).to_string()
+                    replace
+                        .replace(&file_content, content.as_str())
+                        .to_string()
+                } else if let Some(replace) = &injection.replace_all {
+                    replace
+                        .replace_all(&file_content, content.as_str())
+                        .to_string()
                 } else {
                     println!("warning: no injection made");
                     file_content.clone()
                 };
 
+                println!("new_content: {:?}", new_content);
                 self.fs.write_file(&injection_to, &new_content)?;
                 self.printer.injected(&injection_to);
             }
-            Ok(GenResult::Generated {
-                message: message.clone(),
-            })
-        } else {
-            Ok(GenResult::Skipped)
         }
+        Ok(GenResult::Generated {
+            message: message.clone(),
+        })
     }
+}
+#[derive(Debug, Clone)]
+enum MatchPositions {
+    All,
+    First,
+    Last,
+}
+
+fn find_positions(lines: Vec<&str>, regex: &Regex, input: &MatchPositions) -> Vec<usize> {
+    let matching_positions: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, line)| if regex.is_match(line) { Some(i) } else { None })
+        .collect();
+
+    match input {
+        All => matching_positions,
+        First => matching_positions.into_iter().take(1).collect(),
+        Last => matching_positions.into_iter().rev().take(1).collect(),
+    }
+}
+#[derive(Debug)]
+enum InsertionPoint {
+    Before,
+    After,
+}
+
+fn insert_content_at_positions(
+    file_content: &str,
+    content: &str,
+    inline: bool,
+    regex: &Regex,
+    match_positions: MatchPositions,
+    position: InsertionPoint,
+) -> String {
+    println!("file_content: {}", file_content);
+    println!("content: {}", content);
+    println!("regex: {:?}", regex);
+    println!("inline: {:?}", inline);
+    println!("match_positions: {:?}", match_positions);
+    println!("position: {:?}", position);
+    let lines: Vec<String> = file_content.split('\n').map(|line| line.to_string()).collect();
+    let lines = file_content.lines().collect::<Vec<_>>();
+    let positions = find_positions(lines.clone(), regex, &match_positions);
+    println!("positions: {:?}", positions);
+    println!("lines: {:?}", lines);
+
+    let replace_with = |caps: &regex::Captures| {
+        match position {
+            InsertionPoint::Before => format!("{}{}", content, &caps[0]),
+            InsertionPoint::After => format!("{}{}", &caps[0], content),
+        }
+    };
+
+    let new_lines = lines.iter()
+        .enumerate()
+        .flat_map(|(index,line)| {
+        if regex.is_match(line) && positions.contains(&index) {
+            if inline {
+                let new_line = match match_positions {
+                    MatchPositions::All => regex.replace_all(line, replace_with).to_string(),
+                    MatchPositions::First => regex.replace(line, replace_with).to_string(),
+                    MatchPositions::Last => {
+                        let count = regex.find_iter(line).count();
+                        regex.replacen(line, count, replace_with).to_string()
+                    }
+                };
+                println!("new_line: {:?}", new_line);
+                vec![new_line]
+            } else {
+                if matches!(position, InsertionPoint::Before) {
+                    vec![content.to_string(), line.to_string()]
+                } else {
+                    vec![line.to_string(), content.to_string()]
+                }
+            }
+        } else {
+            vec![line.to_string()]
+        }
+    }).collect::<Vec<String>>();
+    println!("new_lines: {:?}", new_lines);
+    new_lines.join("\n")
 }
