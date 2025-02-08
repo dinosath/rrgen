@@ -37,3 +37,4 @@ insta = "1"
 fs_extra = "1.3.0"
 dir-diff = "0.3.3"
 tree-fs = "0.2.1"
+fake = { version = "3.1.0", features = ["bigdecimal","bson_oid","chrono","chrono-tz","geo","glam","http","time","ulid","uuid"] }

@@ -5,7 +5,7 @@ compile_error!("You cannot enable both 'tera' and 'minijinja' at the same time."
 compile_error!("You must enable exactly one feature: 'tera' or 'minijinja'.");
 
 #[cfg(feature = "minijinja")]
-use minijinja::Environment;
+use minijinja::{Environment, functions::Function, value::{FunctionArgs, FunctionResult}};
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::Value;
@@ -208,22 +208,69 @@ impl Default for RRgen {
     }
 }
 
+/// A trait representing a template engine with various functionalities.
 pub trait TemplateEngine {
-    fn register_all_filters(&mut self);
+    /// Adds a function to the template engine.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name of the function.
+    /// * `func` - The function implementing the functionality.
+    fn add_function(&mut self, name: String, func: fn(&Value) -> Result<Value>);
+
+
+    /// Adds a template to the template engine.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name of the template.
+    /// * `template` - The content of the template.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if the operation fails.
     fn add_template(&mut self, name: &str, template: &str) -> Result<()>;
+
+    /// Registers all available filters in the template engine.
+    fn register_all_filters(&mut self);
+
+    /// Renders a string template with the given variables.
+    ///
+    /// # Arguments
+    ///
+    /// * `input` - The template content as a string.
+    /// * `vars` - The variables to be used in the template.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if the operation fails.
     fn render_string(&self, input: &str, vars: &Value) -> Result<String>;
+
+    /// Renders a template by its name with the given variables.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name of the template.
+    /// * `vars` - The variables to be used in the template.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if the operation fails.
     fn render_template_with_name(&self, name: &str, vars: &Value) -> Result<String>;
 }
-
 #[cfg(feature = "tera")]
 impl TemplateEngine for Tera {
-    fn register_all_filters(&mut self) {
-        tera_filters::register_all(self);
+    fn add_function(&mut self, name: &str, func: fn(&Value) -> Value) {
+        // self.register_function(name, func)
     }
 
     fn add_template(&mut self, name: &str, template: &str) -> Result<()> {
         self.add_raw_template(name, template)?;
         Ok(())
+    }
+
+    fn register_all_filters(&mut self) {
+        tera_filters::register_all(self);
     }
 
     fn render_string(&self, input: &str, vars: &Value) -> Result<String> {
@@ -238,14 +285,20 @@ impl TemplateEngine for Tera {
 }
 
 #[cfg(feature = "minijinja")]
+
 impl TemplateEngine for Environment<'static> {
-    fn register_all_filters(&mut self) {
-        minijinja_filters::register_all(self);
+    fn add_function(&mut self, name: String, func: fn(&Value) -> std::result::Result<Value,std::error::Error>) {
+        self.add_function(name, func);
     }
+
 
     fn add_template(&mut self, name: &str, template: &str) -> Result<()> {
         self.add_template_owned(name.to_string(), template.to_string())?;
         Ok(())
+    }
+
+    fn register_all_filters(&mut self) {
+        minijinja_filters::register_all(self);
     }
 
     fn render_string(&self, input: &str, vars: &Value) -> Result<String> {
@@ -473,5 +526,27 @@ impl RRgen {
             }
         }
         Ok(GenResult::Generated { message })
+    }
+}
+
+impl TemplateEngine for RRgen {
+    fn add_function(&mut self, name: String, func: fn(&Value) -> std::result::Result<Value,Error>) {
+        self.template_engine.add_function(name, func);
+    }
+
+    fn add_template(&mut self, name: &str, template: &str) -> Result<()> {
+        self.template_engine.add_template(name, template)
+    }
+
+    fn register_all_filters(&mut self) {
+        self.template_engine.register_all_filters();
+    }
+
+    fn render_string(&self, input: &str, vars: &Value) -> Result<String> {
+        self.template_engine.render_string(input, vars)
+    }
+
+    fn render_template_with_name(&self, name: &str, vars: &Value) -> Result<String> {
+        self.template_engine.render_template_with_name(name, vars)
     }
 }
