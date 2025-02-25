@@ -1,6 +1,6 @@
 use cruet::string::pluralize;
 use heck::{ToKebabCase, ToLowerCamelCase, ToPascalCase, ToSnakeCase};
-use minijinja::Environment;
+use minijinja::{Environment, Error};
 use fake::{Dummy, Fake, Faker};
 use fake::faker::address::en::{*};
 use fake::faker::*;
@@ -53,8 +53,8 @@ pub fn plural(value: String) -> String {
     pluralize::to_plural(&value)
 }
 
-pub fn fake(value: String) -> String {
-    match value.as_str() {
+pub fn fake(value: String) -> Result<String, Error> {
+    let result = match value.as_str() {
         "CityPrefix" => CityPrefix().fake(),
         "CitySuffix"=> CitySuffix().fake(),
         "CityName"=> CityName().fake(),
@@ -130,5 +130,6 @@ pub fn fake(value: String) -> String {
         "RfcStatusCode"=> RfcStatusCode().fake(),
         "ValidStatusCode"=> ValidStatusCode().fake(),
         _ => "".to_string()
-    }
+    };
+    Ok(result)
 }
