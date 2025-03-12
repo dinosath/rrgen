@@ -16,7 +16,7 @@ readme = "../README.md"
 [features]
 default = ["tera"]
 tera = ["dep:tera"]
-minijinja = ["dep:minijinja"]
+minijinja = ["dep:minijinja", "dep:minijinja-contrib"]
 
 [dependencies]
 tera = { version = "1", optional = true }
@@ -30,7 +30,8 @@ regex = "1"
 serde_regex = "1.1.0"
 fs-err = "3.0.0"
 glob = "0.3.1"
-minijinja = { version = "2.5.0", features = ["default", "loop_controls","loader"], optional = true }
+minijinja = { version = "2.8.0", features = ["default", "loop_controls","loader"], optional = true }
+minijinja-contrib = { version = "2.8.0", features = ["datetime", "timezone", "rand", "wordcount", "wordwrap", "unicode_wordwrap"], optional = true }
 log = "0.4.22"
 fake = { version = "3.1.0", features = ["bigdecimal","bson_oid","chrono","chrono-tz","geo","glam","http","time","ulid","uuid"] }
 [dev-dependencies]
