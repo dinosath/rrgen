@@ -27,6 +27,7 @@ pub fn register_all(env: &mut Environment) {
     env.add_filter("lower_camel_case", lower_camel_case);
     env.add_filter("plural", plural);
     env.add_function("fake", fake);
+    minijinja_contrib::add_to_environment(env);
 }
 
 pub fn snake_case(value: String) -> String {
